@@ -175,6 +175,7 @@ if __name__ == '__main__':
             loss, recon, kld = loss_fn(x, x_hat, mu, logv)
             opt.zero_grad(); loss.backward(); opt.step()
             tot_loss += loss.item()
+            
         print(f"Epoch {ep}/{epochs} - Loss: {tot_loss/len(loader):.4f} (Recon {recon:.4f}, KLD {kld:.4f})")
     # Guardar
     torch.save(vae.state_dict(), 'ecg_vae.pth')
