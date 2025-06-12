@@ -52,14 +52,17 @@ def zscore_normalize(sig):
     std  = np.std(sig,  axis=1, keepdims=True) + 1e-6
     return (sig - mean) / std
 
+
 def segment_signal(sig):
-    """
-    Recorta o rellena a SEGMENT_SAMPLES muestras.
-    """
+    # sig: (12, L)
+    # seleccionamos solo lead II, que suele ser el canal 1 (ajustá si fuera otro índice)
+    sig = sig[1:2, :]   # ahora (1, L)
     if sig.shape[1] >= SEGMENT_SAMPLES:
         return sig[:, :SEGMENT_SAMPLES]
     pad = SEGMENT_SAMPLES - sig.shape[1]
     return np.pad(sig, ((0,0),(0,pad)), mode='constant')
+
+
 
 def find_file(root, filename):
     """

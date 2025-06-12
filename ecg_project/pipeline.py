@@ -58,7 +58,7 @@ BATCH     = 32
 LR        = 1e-3
 LATENT    = 60
 MODEL_OUT = 'best_cvae.pth'
-METRICS_OUT = 'metrics_combined.json'
+METRICS_OUT = 'metrics_combined_lead_II.json'
 
 
 def preprocess_and_segment(sig, fs):
@@ -136,16 +136,22 @@ def load_chapman_anomalies(chap_dir):
     return np.stack(out) if out else np.empty((0,12,2048))
 
 
-def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+def load_sanos():
     # --- Carga y prepara sanos PTB+Chapman ---
     print("Cargando sanos PTB-XL y Chapman…")
     normals_ptb  = load_ptbxl(PTB_DIR, healthy_only=True)
     normals_chap = load_chapman(CHAP_DIR, healthy_only=True)
     data = np.concatenate([normals_ptb, normals_chap], axis=0)
     print(f"Total sanos disponibles: {len(data)} señales")
+    
+    return data
 
+def main():
+    data = load_sanos()
+    model, val_loader, device= training(data)
+
+def training(data):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Train/Val split 80/20
     n_val = int(0.2 * len(data))
     n_train = len(data) - n_val
@@ -154,7 +160,9 @@ def main():
     val_loader = DataLoader(TensorDataset(torch.tensor(val_set)), batch_size=BATCH)
 
     # --- Modelo ---
-    model = CVAE(in_channels=12, latent_dim=LATENT, input_length=2048).to(device)
+    # model = CVAE(in_channels=1, latent_dim=LATENT, input_length=2048).to(device)
+    model = CVAE(in_channels=1, latent_dim=60, input_length=2048).to(device)
+
     opt   = torch.optim.Adam(model.parameters(), lr=LR)
     best_mae = float('inf')
 
@@ -187,7 +195,6 @@ def main():
             torch.save(model.state_dict(), MODEL_OUT)
             
     return model, val_loader, device
-
 
 
 
@@ -251,6 +258,23 @@ def metrics(healthy_errors, ptb_errors, chap_errors):
     print(f"Resultados guardados en {METRICS_OUT}")
 
 
+def metrics_fixed_threshold(healthy_errors, ptb_errors, chap_errors, threshold):
+    y_true = np.concatenate([
+        np.zeros_like(healthy_errors),
+        np.ones_like(ptb_errors),
+        np.ones_like(chap_errors)
+    ])
+    y_pred = np.concatenate([
+        healthy_errors,
+        ptb_errors,
+        chap_errors
+    ]) > threshold
+
+    metrics = evaluate_detection(y_true, y_pred)
+    print("Métricas (con umbral percentil 95 de sanos):", metrics)
+    save_metrics(metrics, METRICS_OUT)
+    print(f"Resultados guardados en {METRICS_OUT}")
+    
 
 if __name__ == '__main__':
     main()
