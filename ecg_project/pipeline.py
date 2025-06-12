@@ -210,8 +210,8 @@ def load(model, val_loader, device):
     
     # hold-out sanos
     healthy_errors = compute_reconstruction_error(model, val_loader, device)
-    thr = np.percentile(healthy_errors, 95)
-    print(f"Threshold @95pct de sanos: {thr:.4f}")
+    thr = np.percentile(healthy_errors, 99.9)
+    print(f"Threshold @99.9pct de sanos: {thr:.4f}")
 
     
     return df_meta, healthy_errors, thr
@@ -271,7 +271,7 @@ def metrics_fixed_threshold(healthy_errors, ptb_errors, chap_errors, threshold):
     ]) > threshold
 
     metrics = evaluate_detection(y_true, y_pred)
-    print("Métricas (con umbral percentil 95 de sanos):", metrics)
+    print("Métricas (con umbral percentil 99.9 de sanos):", metrics)
     save_metrics(metrics, METRICS_OUT)
     print(f"Resultados guardados en {METRICS_OUT}")
     
