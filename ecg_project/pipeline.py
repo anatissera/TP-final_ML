@@ -150,7 +150,7 @@ def main():
     data = load_sanos()
     model, val_loader, device= training(data)
 
-def training(data):
+def training(data, epochs = EPOCHS):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # Train/Val split 80/20
     n_val = int(0.2 * len(data))
@@ -168,10 +168,10 @@ def training(data):
 
     # Entrenamiento + validación
     print("Iniciando entrenamiento…")
-    for ep in range(1, EPOCHS+1):
+    for ep in range(1, epochs+1):
         model.train()
         train_loss = 0.0
-        for (x,) in tqdm(train_loader, desc=f"Ep {ep}/{EPOCHS} Train", leave=False):
+        for (x,) in tqdm(train_loader, desc=f"Ep {ep}/{epochs} Train", leave=False):
             x = x.float().to(device)
             recon, mu, logvar = model(x)
             loss = loss_function(recon, x, mu, logvar)

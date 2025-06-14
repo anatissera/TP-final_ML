@@ -176,3 +176,95 @@ def load_mitbih(mit_dir):
                 except Exception as e:
                     print(f"Warning: no pude leer {prefix}: {e}")
     return np.stack(records, axis=0) if records else np.empty((0,12,SEGMENT_SAMPLES))
+
+
+
+
+
+
+
+
+import os
+
+def find_data_subfolder(subfolder_name, start_path='.'):
+    current_path = os.path.abspath(start_path)
+    while True:
+        candidate = os.path.join(current_path, 'data', subfolder_name)
+        if os.path.isdir(candidate):
+            return candidate
+        parent = os.path.dirname(current_path)
+        if parent == current_path:
+            break
+        current_path = parent
+    return None
+
+# Ahora buscás las rutas relativas automáticamente:
+PTB_DIR = find_data_subfolder('ptb-xl/1.0.3')
+CHAP_DIR = find_data_subfolder('ChapmanShaoxing')
+MIT_DIR = find_data_subfolder('mitdb')
+
+
+
+def preprocess_and_segment(sig, fs):
+    """
+    Aplica filtro, remuestreo y normalización a una señal (12, L).
+    """
+    sig = apply_highpass(sig, fs)
+    sig = resample_signal(sig, fs)
+    sig = zscore_normalize(sig)
+    sig = segment_signal(sig)
+    return sig
+
+
+def load_ptbxl_anomalies(ptb_dir, meta_df):
+    """
+    Recorre el metadata DF de PTB-XL para cargar solo las señales con SCP != NORM.
+    Devuelve array (N,12,2048).
+    """
+    out = []
+    for _, row in meta_df.iterrows():
+        fn = row['filename_lr']
+        hea = os.path.basename(fn) + '.hea'
+        hea_path = find_file(ptb_dir, hea)
+        prefix = os.path.splitext(hea_path)[0]
+        rec = load_ptbxl_signal(ptb_dir, fn)  # p_signal, fs
+        sig, fs = rec
+        if not row['scp_codes'].count('NORM'):
+            sig = preprocess_and_segment(sig, fs)
+            out.append(sig)
+    return np.stack(out) if out else np.empty((0,12,2048))
+
+
+
+def load_chapman_anomalies(chap_dir):
+    """
+    Carga todas las señales Chapman y filtra solo las anomalías (Dx != 426177001).
+    """
+    out = []
+    for root, _, files in os.walk(chap_dir):
+        for f in files:
+            if f.endswith('.hea') and 'Zone' not in f:
+                hea_path = os.path.join(root, f)
+                # extrae Dx
+                with open(hea_path) as fh:
+                    lines = fh.read().splitlines()
+                dx = next((l.split()[1] for l in lines if l.startswith('#Dx:')), '')
+                if dx != '426177001':
+                    rec_id = f.replace('.hea','')
+                    mat_path = os.path.join(root, rec_id + '.mat')
+                    # aquí usamos loadmat importado
+                    sig = loadmat(mat_path)['val']   # ya es (12, L)
+                    sig = preprocess_and_segment(sig, 500)
+                    out.append(sig)
+    return np.stack(out) if out else np.empty((0,12,2048))
+
+
+def load_sanos():
+    # --- Carga y prepara sanos PTB+Chapman ---
+    print("Cargando sanos PTB-XL y Chapman…")
+    normals_ptb  = load_ptbxl(PTB_DIR, healthy_only=True)
+    normals_chap = load_chapman(CHAP_DIR, healthy_only=True)
+    data = np.concatenate([normals_ptb, normals_chap], axis=0)
+    print(f"Total sanos disponibles: {len(data)} señales")
+    
+    return data
