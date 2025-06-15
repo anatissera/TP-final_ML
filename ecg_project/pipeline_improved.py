@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,10 +8,21 @@ from sklearn.svm import OneClassSVM
 from xgboost import XGBClassifier
 import pandas as pd
 
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score, accuracy_score, r2_score
+
+
+
+# from preprocess import (
+#     load_sanos,
+#     load_ptbxl_anomalies,
+#     load_chapman_anomalies
+# )
+
 from preprocess import (
     load_sanos,
-    load_ptbxl_anomalies,
-    load_chapman_anomalies
+    load_all_anomalies,
+    compute_zscore_stats,
+    apply_zscore,
 )
 
 # Augmentation
@@ -93,101 +103,224 @@ def compute_scores(model, loader, device, beta):
             zs.append(mu.cpu().numpy())
     return np.concatenate(errs), np.vstack(zs)
 
-# Main hyperparameter sweep
+# # Training and evaluation with best hyperparameters
+# if __name__ == '__main__':
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     # 1) Load and prepare data
+#     norms = load_sanos()
+#     ptb   = load_ptbxl_anomalies()
+#     chap  = load_chapman_anomalies()
+#     anos  = np.concatenate([ptb, chap], axis=0)
+
+#     # Select lead II and reshape
+#     norms_lead = norms[:, 0, :]
+#     anos_lead  = anos[:, 0, :]
+#     X_norm = torch.tensor(norms_lead, dtype=torch.float32).unsqueeze(1)
+#     X_ano  = torch.tensor(anos_lead,  dtype=torch.float32).unsqueeze(1)
+
+#     # Split normals
+#     n_norm = len(X_norm)
+#     i1 = int(0.8 * n_norm)
+#     train_norm = X_norm[:i1]
+#     val_norm   = X_norm[i1:]
+
+#     # Chosen hyperparameters
+#     latent_dim = 32
+#     lr         = 1e-3
+#     n_blocks   = 3
+#     beta_fn    = beta_cyclic
+#     epochs     = 50
+
+#     # a) Train VAE on normals only
+#     train_ds    = TensorDataset(train_norm, torch.zeros(len(train_norm)))
+#     train_loader= DataLoader(train_ds, batch_size=32, shuffle=True)
+#     model = VAE1D(input_ch=1, latent_dim=latent_dim, n_blocks=n_blocks).to(device)
+#     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+#     for epoch in range(epochs):
+#         model.train()
+#         total_loss = 0
+#         for x, _ in train_loader:
+#             x = x.to(device)
+#             mu, logv = model.encode(x)
+#             z = model.reparameterize(mu, logv)
+#             rec = model.decode(z)
+#             recon_loss = ((rec - x)**2).mean()
+#             kl_loss = (-0.5*(1+logv-mu.pow(2)-logv.exp()).sum())/x.size(0)
+#             beta = beta_fn(epoch, epochs)
+#             loss = recon_loss + beta * kl_loss
+#             optimizer.zero_grad(); loss.backward(); optimizer.step()
+#             total_loss += loss.item()
+#         print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(train_loader):.4f}")
+
+#     # b) Prepare balanced test set
+#     N = len(val_norm)
+#     val_ano = X_ano[:N]
+#     X_test  = torch.cat([val_norm, val_ano], dim=0)
+#     y_test  = np.concatenate([np.zeros(N), np.ones(N)])
+#     test_ds = TensorDataset(X_test, torch.tensor(y_test, dtype=torch.long))
+#     test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
+
+#     # c) Compute ELBO scores and latents
+#     beta_last = beta_fn(epochs-1, epochs)
+#     errs, zs = compute_scores(model, test_loader, device, beta_last)
+
+#     # d) Mahalanobis distance
+#     mu_bar = zs[:N].mean(axis=0)
+#     cov = np.cov(zs[:N].T) + 1e-6*np.eye(latent_dim)
+#     invcov = np.linalg.inv(cov)
+#     dM = np.sqrt(((zs-mu_bar)@invcov*(zs-mu_bar)).sum(axis=1))
+
+#     # e) Combine with alpha=1 (ELBO) or tuned alpha, here use best_alpha from sweep
+#     alpha = 1.0
+#     combined_score = alpha*errs + (1-alpha)*dM
+
+#     # f) XGBoost classifier on [err, latents]
+#     Xf = np.hstack([errs.reshape(-1,1), zs])
+#     clf = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+#     clf.fit(Xf, y_test)
+#     prob = clf.predict_proba(Xf)[:,1]
+
+#     # g) Compute metrics
+#     from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score, r2_score
+#     # Binarize at 0.5 for classification metrics
+#     y_pred = (prob >= 0.5).astype(int)
+#     metrics = {
+#         'roc_auc': roc_auc_score(y_test, prob),
+#         'precision': precision_score(y_test, y_pred),
+#         'recall': recall_score(y_test, y_pred),
+#         'f1': f1_score(y_test, y_pred),
+#         'accuracy': accuracy_score(y_test, y_pred),
+#         'r2': r2_score(y_test, prob)
+#     }
+#     print("Final metrics:", metrics)
+import os
+
+def find_data_subfolder(subfolder_name, start_path='.'):
+    current_path = os.path.abspath(start_path)
+    while True:
+        candidate = os.path.join(current_path, 'data', subfolder_name)
+        if os.path.isdir(candidate):
+            return candidate
+        parent = os.path.dirname(current_path)
+        if parent == current_path:
+            break
+        current_path = parent
+    return None
+
+def find_file(root, filename):
+    """
+    Busca recursivamente `filename` bajo `root` y devuelve la ruta completa.
+    """
+    for r, _, files in os.walk(root):
+        if filename in files:
+            return os.path.join(r, filename)
+    return None
+
+
+# Ahora buscás las rutas relativas automáticamente:
+PTB_DIR = find_data_subfolder('ptb-xl/1.0.3')
+CHAP_DIR = find_data_subfolder('ChapmanShaoxing')
+MIT_DIR = find_data_subfolder('mitdb')
+
+
+
+
+
 if __name__ == '__main__':
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # 1) Load data: only normals for training, anomalies for testing
-    norms = load_sanos()
-    ptb   = load_ptbxl_anomalies()
-    chap  = load_chapman_anomalies()
-    anos  = np.concatenate([ptb, chap], axis=0)
+    # 1) Cargar datos sanos y anomalías
+    normals   = load_sanos(PTB_DIR, CHAP_DIR)  # (N_norm,1,L)
+    ptb_df    = pd.read_csv(find_file(PTB_DIR, 'ptbxl_database.csv'))
+    anomalies = load_all_anomalies(PTB_DIR, CHAP_DIR, ptb_df)  # (N_ano,1,L)
 
-    # Convert to tensors with proper channel dim
-    X_norm = torch.tensor(norms[:,1:2,:], dtype=torch.float32)
-    X_ano  = torch.tensor(anos[:,1:2,:], dtype=torch.float32)
-
-    # Split normals into train/val
-    n_norm = len(X_norm)
+    # 2) Split normales en train/dev/test (60/20/20)
+    n_norm = normals.shape[0]
     i1 = int(0.6 * n_norm)
     i2 = int(0.8 * n_norm)
-    train_norm = X_norm[:i1]
-    val_norm   = X_norm[i1:i2]
+    train_norm = normals[:i1]
+    val_norm   = normals[i1:i2]
+    test_norm  = normals[i2:]
 
-    # Hyperparameter grid
-    grid = {
-        'latent_dim': [8, 16, 32],
-        'lr': [1e-3, 1e-4],
-        'n_blocks': [2, 3],
-        'beta_fn': [('linear', beta_linear), ('cyclic', beta_cyclic)]
+    # 3) Normalización Z-score usando solo train_norm
+    mean, std = compute_zscore_stats(train_norm)
+    train_norm = apply_zscore(train_norm, mean, std)
+    val_norm   = apply_zscore(val_norm,   mean, std)
+    test_norm  = apply_zscore(test_norm,  mean, std)
+    anomalies  = apply_zscore(anomalies,  mean, std)
+
+    # 4) Convertir a tensores
+    train_tensor = torch.tensor(train_norm, dtype=torch.float32)
+    val_tensor   = torch.tensor(val_norm,   dtype=torch.float32)
+    test_tensor  = torch.tensor(test_norm,  dtype=torch.float32)
+    ano_tensor   = torch.tensor(anomalies,  dtype=torch.float32)
+    
+    # 4) Configuración entrenamiento único
+    latent_dim = 32
+    lr         = 1e-3
+    n_blocks   = 3
+    epochs     = 50
+    batch_size = 32
+
+    # 5) Entrena VAE sobre conjunto DEV (train_norm + val_norm)
+    dev_tensor = torch.cat([train_tensor, val_tensor], dim=0)
+    dev_ds     = TensorDataset(dev_tensor, torch.zeros(len(dev_tensor)))
+    dev_loader = DataLoader(dev_ds, batch_size=batch_size, shuffle=True)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = VAE1D(input_ch=1, latent_dim=latent_dim, n_blocks=n_blocks).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+        for x, _ in dev_loader:
+            x = x.to(device)
+            mu, logv = model.encode(x)
+            z = model.reparameterize(mu, logv)
+            rec = model.decode(z)
+            recon_loss = ((rec - x)**2).mean()
+            kl_loss = (-0.5 * (1 + logv - mu.pow(2) - logv.exp()).sum()) / x.size(0)
+            beta = beta_cyclic(epoch, cycle=10, beta_max=4.0)
+            loss = recon_loss + beta * kl_loss
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(dev_loader):.4f}")
+
+    # 6) Prepara test final balanceado: test_norm vs primeras anomalías
+    N_test = test_tensor.shape[0]
+    test_x = torch.cat([test_tensor, ano_tensor[:N_test]], dim=0)
+    y_test = np.concatenate([np.zeros(N_test), np.ones(N_test)])
+    test_loader = DataLoader(TensorDataset(test_x, torch.tensor(y_test, dtype=torch.long)), batch_size=batch_size)
+
+    # 7) Obtiene scores ELBO y z_mean en test
+    beta_last = beta_cyclic(epochs-1, cycle=10, beta_max=4.0)
+    errs, zs = compute_scores(model, test_loader, device, beta_last)
+
+    # 8) Mahalanobis distance en test_norm
+    mu_bar = zs[:N_test].mean(axis=0)
+    cov    = np.cov(zs[:N_test].T) + 1e-6 * np.eye(latent_dim)
+    invcov = np.linalg.inv(cov)
+    dM     = np.sqrt(((zs - mu_bar) @ invcov * (zs - mu_bar)).sum(axis=1))
+
+    # 9) Clasificador XGBoost en test
+    # Limpiar infinities
+    max_val = np.finfo(np.float32).max/10
+    min_val = np.finfo(np.float32).min/10
+    errs = np.nan_to_num(errs, nan=0.0, posinf=max_val, neginf=min_val)
+    zs   = np.nan_to_num(zs,   nan=0.0, posinf=max_val, neginf=min_val)
+    Xf   = np.hstack([errs.reshape(-1,1), zs])
+    clf = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+    clf.fit(Xf, y_test)
+    probs = clf.predict_proba(Xf)[:,1]
+
+    # 10) Métricas finales
+    auc      = roc_auc_score(y_test, probs)
+    y_pred   = (probs >= 0.5).astype(int)
+    metrics  = {
+        'roc_auc':   auc,
+        'precision': precision_score(y_test, y_pred),
+        'recall':    recall_score(y_test, y_pred),
+        'f1':        f1_score(y_test, y_pred),
+        'accuracy':  accuracy_score(y_test, y_pred),
+        'r2':        r2_score(y_test, probs)
     }
-    results = []
-
-    for ld in grid['latent_dim']:
-        for lr in grid['lr']:
-            for nb in grid['n_blocks']:
-                for name, beta_fn in grid['beta_fn']:
-                    # a) Train VAE on normals only
-                    train_ds = TensorDataset(train_norm, torch.zeros(len(train_norm)))
-                    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-                    model = VAE1D(input_ch=1, latent_dim=ld, n_blocks=nb).to(device)
-                    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-                    for epoch in range(10):
-                        model.train()
-                        for x, _ in train_loader:
-                            x = x.to(device)
-                            mu, logv = model.encode(x)
-                            z = model.reparameterize(mu, logv)
-                            rec = model.decode(z)
-                            recon_loss = ((rec - x)**2).mean()
-                            kl_loss = (-0.5 * (1 + logv - mu.pow(2) - logv.exp()).sum())/x.size(0)
-                            beta = beta_fn(epoch, 10)
-                            loss = recon_loss + beta * kl_loss
-                            optimizer.zero_grad()
-                            loss.backward()
-                            optimizer.step()
-
-                    # b) Prepare validation set: equal normals and anomalies
-                    N = len(val_norm)
-                    val_ano = X_ano[:N]
-                    X_val = torch.cat([val_norm, val_ano], dim=0)
-                    y_val = np.concatenate([np.zeros(N), np.ones(N)])
-                    val_ds = TensorDataset(X_val, torch.tensor(y_val, dtype=torch.long))
-                    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
-
-                    # c) Compute scores on validation
-                    beta_last = beta_fn(9, 10)
-                    errs, zs = compute_scores(model, val_loader, device, beta_last)
-
-                    # d) Mahalanobis
-                    mu_bar = zs[:N].mean(axis=0)
-                    cov = np.cov(zs[:N].T) + 1e-6 * np.eye(ld)
-                    invcov = np.linalg.inv(cov)
-                    dM = np.sqrt(((zs - mu_bar) @ invcov * (zs - mu_bar)).sum(axis=1))
-
-                    # e) Combined sweep
-                    best_a, best_auc = 0, 0
-                    for a in [0, 0.25, 0.5, 0.75, 1]:
-                        comb = a * errs + (1 - a) * dM
-                        auc = roc_auc_score(y_val, -comb)
-                        if auc > best_auc:
-                            best_a, best_auc = a, auc
-
-                    # f) XGBoost classifier on validation set
-                    Xf = np.hstack([errs.reshape(-1,1), zs])
-                    clf = XGBClassifier(use_label_encoder=False, eval_metric='logloss')
-                    clf.fit(Xf, y_val)
-                    probs = clf.predict_proba(Xf)[:,1]
-                    clf_auc = roc_auc_score(y_val, probs)
-
-                    results.append({
-                        'latent_dim': ld,
-                        'lr': lr,
-                        'n_blocks': nb,
-                        'beta': name,
-                        'best_alpha': best_a,
-                        'auc_comb': best_auc,
-                        'auc_xgb': clf_auc
-                    })
-    # Save sweep results
-    pd.DataFrame(results).to_csv('hyperparam_sweep_results.csv', index=False)
-    print("Sweep completo. Resultados en hyperparam_sweep_results.csv")
+    print('Final metrics:', metrics)
