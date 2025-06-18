@@ -1,0 +1,1355 @@
+--- PROJECT STRUCTURE (`tree -L 3 -a -I ...`) ---
+```text
+ERROR: 'tree' command not found. Please install it (e.g., 'brew install tree' or 'sudo apt-get install tree').
+```
+
+========================================
+
+
+--- START FILE: ecg_data_exploration_raw.py ---
+
+```python
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import butter, filtfilt
+from scipy.fft import fft, fftfreq
+import wfdb
+from wfdb import rdrecord
+from scipy.io import loadmat
+
+# ---------- Utilities ----------
+def list_directory(start_dir, depth=2):
+    """
+    Prints directory structure up to given depth.
+    """
+    for root, dirs, files in os.walk(start_dir):
+        level = root.replace(start_dir, '').count(os.sep)
+        if level > depth:
+            continue
+        indent = '  ' * level
+        # print(f"{indent}{os.path.basename(root)}/")
+        # if level < depth:
+        #     for f in files:
+        #         print(f"{indent}  - {f}")
+
+# ---------- Parse Chapman Header ----------
+def parse_chapman_header(hea_path):
+    """
+    Extracts metadata from Chapman-Shaoxing .hea header.
+    """
+    with open(hea_path, 'r') as f:
+        lines = [l.strip() for l in f.readlines()]
+    parts = lines[0].split()
+    record_id = parts[0].replace('.mat', '')
+    age = next((l.split()[1] for l in lines if l.startswith('#Age:')), None)
+    sex = next((l.split()[1] for l in lines if l.startswith('#Sex:')), None)
+    dx  = next((l.split()[1] for l in lines if l.startswith('#Dx:')), None)
+    return {'record': record_id, 'age': age, 'sex': sex, 'diagnosis': dx}
+
+# ---------- Loading Metadata ----------
+
+def load_ptbxl_metadata(ptb_dir):
+    csv = next((os.path.join(r, f) for r, _, fs in os.walk(ptb_dir)
+                for f in fs if f == 'ptbxl_database.csv'), None)
+    df = pd.read_csv(csv)
+    return df[['ecg_id', 'filename_lr', 'scp_codes', 'age', 'sex']]
+
+def load_chapman_metadata(path):
+    recs = []
+    for root, _, files in os.walk(path):
+        for file in files:
+            if file.endswith('.hea') and 'Zone' not in file:
+                recs.append(parse_chapman_header(os.path.join(root, file)))
+    return pd.DataFrame(recs)
+
+def filter_chapman_normal(df):
+    return df[df['diagnosis'].str.contains('426177001', na=False)].reset_index(drop=True)
+
+# ---------- Signal Loading ----------
+
+def load_ptbxl_signal(ptb_dir, filename_lr):
+    """
+    Loads PTB-XL record by locating the .hea header matching filename_lr.
+    filename_lr is metadata string like 'records100/00000/00001_lr'.
+    """
+    # Derive expected header basename
+    hea_basename = os.path.basename(filename_lr) + '.hea'
+    hea_path = None
+    for root, _, files in os.walk(ptb_dir):
+        if hea_basename in files:
+            hea_path = os.path.join(root, hea_basename)
+            break
+    if hea_path is None:
+        raise FileNotFoundError(f"No se encontró header PTB-XL para '{filename_lr}' (buscando '{hea_basename}') en {ptb_dir}")
+    # Record prefix is full path without extension
+    record_prefix = os.path.splitext(hea_path)[0]
+    record = rdrecord(record_prefix)
+    return record.p_signal.T, record.fs
+
+def load_chapman_signal(chap_dir, record_id):
+    mat_path = os.path.join(chap_dir, f"{record_id}.mat")
+    data = loadmat(mat_path)['val']
+    return data, 500
+
+# ---------- Visualization ----------
+
+def plot_signal(time, signal, lead=0, title="ECG Signal"):
+    plt.figure()
+    plt.plot(time, signal[lead])
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.title(f"{title} - Lead {lead}")
+    plt.grid(True)
+    plt.show()
+
+def plot_fft(signal, fs, lead=0, title="FFT of ECG Signal"):
+    n = signal.shape[1]
+    yf = fft(signal[lead])
+    xf = fftfreq(n, 1 / fs)
+    plt.figure()
+    plt.plot(xf[:n//2], np.abs(yf[:n//2]))
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Magnitude')
+    plt.title(f"{title} - Lead {lead}")
+    plt.grid(True)
+    plt.show()
+
+# ---------- Filtering ----------
+
+def butter_lowpass(cutoff, fs, order=4):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    return butter(order, normal_cutoff, btype='low', analog=False)
+
+def apply_lowpass(data, fs, cutoff=40.0, order=4):
+    b, a = butter_lowpass(cutoff, fs, order)
+    return filtfilt(b, a, data)
+
+# ---------- Main Analysis ----------
+
+if __name__ == '__main__':
+    PTBXL_DIR = 'data/ptb-xl'
+    CHAPMAN_DIR = 'data/ChapmanShaoxing'
+
+    # Directory trees
+    print("PTB-XL structure:")
+    list_directory(PTBXL_DIR, depth=3)
+    print("\nChapman-Shaoxing structure:")
+    list_directory(CHAPMAN_DIR, depth=2)
+
+    # Metadata
+    ptb_meta = load_ptbxl_metadata(PTBXL_DIR)
+    ptb_norm = ptb_meta[ptb_meta['scp_codes'].str.contains('NORM', na=False)]
+    print(f"PTB-XL normales: {len(ptb_norm)} registros")
+
+    chap_meta = load_chapman_metadata(CHAPMAN_DIR)
+    chap_norm = filter_chapman_normal(chap_meta)
+    print(f"Chapman-Shaoxing normales: {len(chap_norm)} registros")
+
+    # PTB-XL sample
+    sample = ptb_norm.iloc[0]
+    sig, fs = load_ptbxl_signal(PTBXL_DIR, sample['filename_lr'])
+    time = np.arange(sig.shape[1]) / fs
+    plot_signal(time, sig, title="Raw PTB-XL ECG")
+
+    # Chapman sample
+    if len(chap_norm):
+        rec = chap_norm.iloc[0]['record']
+        chap_sig, chap_fs = load_chapman_signal(CHAPMAN_DIR, rec)
+        chap_time = np.arange(chap_sig.shape[1]) / chap_fs
+        plot_signal(chap_time, chap_sig, title="Raw Chapman ECG")
+    else:
+        print("No hay registros normales de Chapman para plotear.")
+```
+
+--- END FILE: ecg_data_exploration_raw.py ---
+
+--- START FILE: ecg_data_exploration_scaled_filtered.py ---
+
+```python
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import butter, filtfilt
+import wfdb
+from wfdb import rdrecord
+from scipy.io import loadmat
+
+# ---------- Utilities ----------
+def list_directory(start_dir, depth=2):
+    """Prints directory structure up to given depth."""
+    for root, dirs, files in os.walk(start_dir):
+        level = root.replace(start_dir, '').count(os.sep)
+        if level > depth:
+            continue
+        indent = '  ' * level
+        # print(f"{indent}{os.path.basename(root)}/")
+        # if level < depth:
+        #     for f in files:
+        #         print(f"{indent}  - {f}")
+
+# ---------- Parse Chapman Header ----------
+def parse_chapman_header(hea_path):
+    with open(hea_path, 'r') as f:
+        lines = [l.strip() for l in f.readlines()]
+    parts = lines[0].split()
+    record_id = parts[0].replace('.mat', '')
+    age = next((l.split()[1] for l in lines if l.startswith('#Age:')), None)
+    sex = next((l.split()[1] for l in lines if l.startswith('#Sex:')), None)
+    dx  = next((l.split()[1] for l in lines if l.startswith('#Dx:')), None)
+    return {'record': record_id, 'age': age, 'sex': sex, 'diagnosis': dx}
+
+# ---------- Loading Metadata ----------
+def load_ptbxl_metadata(ptb_dir):
+    csv = next((os.path.join(r, f) for r, _, fs in os.walk(ptb_dir)
+                for f in fs if f == 'ptbxl_database.csv'), None)
+    df = pd.read_csv(csv)
+    return df[['ecg_id', 'filename_lr', 'scp_codes', 'age', 'sex']]
+
+def load_chapman_metadata(path):
+    recs = []
+    for root, _, files in os.walk(path):
+        for file in files:
+            if file.endswith('.hea') and 'Zone' not in file:
+                recs.append(parse_chapman_header(os.path.join(root, file)))
+    return pd.DataFrame(recs)
+
+def filter_chapman_normal(df):
+    return df[df['diagnosis'].str.contains('426177001', na=False)].reset_index(drop=True)
+
+# ---------- Signal Loading ----------
+def load_ptbxl_signal(ptb_dir, filename_lr):
+    hea_basename = os.path.basename(filename_lr) + '.hea'
+    hea_path = None
+    for root, _, files in os.walk(ptb_dir):
+        if hea_basename in files:
+            hea_path = os.path.join(root, hea_basename)
+            break
+    if hea_path is None:
+        raise FileNotFoundError(f"No se encontró header PTB-XL para '{filename_lr}' (buscando '{hea_basename}') en {ptb_dir}")
+    record_prefix = os.path.splitext(hea_path)[0]
+    record = rdrecord(record_prefix)
+    return record.p_signal.T, record.fs
+
+def load_chapman_signal(chap_dir, record_id):
+    mat_path = os.path.join(chap_dir, f"{record_id}.mat")
+    data = loadmat(mat_path)['val']
+    return data, 500
+
+# ---------- Preprocessing ----------
+def butter_bandpass(lowcut, highcut, fs, order=4):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    return b, a
+
+def apply_bandpass(data, fs, lowcut=0.5, highcut=40.0, order=4):
+    b, a = butter_bandpass(lowcut, highcut, fs, order)
+    return filtfilt(b, a, data)
+
+def normalize_signal(data, method='zscore'):
+    """Normalize each channel: 'zscore' or 'minmax'."""
+    if method == 'zscore':
+        mu = np.mean(data, axis=1, keepdims=True)
+        sigma = np.std(data, axis=1, keepdims=True)
+        return (data - mu) / (sigma + 1e-8)
+    elif method == 'minmax':
+        minv = np.min(data, axis=1, keepdims=True)
+        maxv = np.max(data, axis=1, keepdims=True)
+        return 2 * (data - minv) / (maxv - minv + 1e-8) - 1
+    else:
+        raise ValueError(f"Método de normalización desconocido: {method}")
+
+# ---------- Visualization ----------
+def plot_signal(time, signal, lead=0, title="ECG Signal"):
+    plt.figure()
+    plt.plot(time, signal[lead])
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.title(f"{title} - Lead {lead}")
+    plt.grid(True)
+    plt.show()
+
+# ---------- Main Analysis ----------
+if __name__ == '__main__':
+    PTBXL_DIR = 'data/ptb-xl'
+    CHAPMAN_DIR = 'data/ChapmanShaoxing'
+
+    print("PTB-XL structure:")
+    list_directory(PTBXL_DIR, depth=3)
+    print("\nChapman-Shaoxing structure:")
+    list_directory(CHAPMAN_DIR, depth=2)
+
+    # Load metadata and filter normals
+    ptb_meta = load_ptbxl_metadata(PTBXL_DIR)
+    ptb_norm = ptb_meta[ptb_meta['scp_codes'].str.contains('NORM', na=False)]
+    print(f"PTB-XL normales: {len(ptb_norm)} registros")
+
+    chap_meta = load_chapman_metadata(CHAPMAN_DIR)
+    chap_norm = filter_chapman_normal(chap_meta)
+    print(f"Chapman-Shaoxing normales: {len(chap_norm)} registros")
+
+    # PTB-XL sample
+    sample = ptb_norm.iloc[0]
+    sig_ptb, fs_ptb = load_ptbxl_signal(PTBXL_DIR, sample['filename_lr'])
+    sig_ptb = apply_bandpass(sig_ptb, fs_ptb)
+    sig_ptb = normalize_signal(sig_ptb, method='minmax')  # escala [-1,1]
+    time_ptb = np.arange(sig_ptb.shape[1]) / fs_ptb
+    plot_signal(time_ptb, sig_ptb, title="Preprocessed PTB-XL ECG [-1,1]")
+
+    # Chapman sample
+    if len(chap_norm) > 0:
+        rec = chap_norm.iloc[0]['record']
+        sig_chap, fs_chap = load_chapman_signal(CHAPMAN_DIR, rec)
+        sig_chap = apply_bandpass(sig_chap, fs_chap)
+        sig_chap = normalize_signal(sig_chap, method='minmax')  # escala [-1,1]
+        time_chap = np.arange(sig_chap.shape[1]) / fs_chap
+        plot_signal(time_chap, sig_chap, title="Preprocessed Chapman ECG [-1,1]")
+    else:
+        print("No hay registros normales de Chapman para procesar.")
+```
+
+--- END FILE: ecg_data_exploration_scaled_filtered.py ---
+
+--- START FILE: ecg_preprocessing_analysis.py ---
+
+```python
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import butter, filtfilt
+from scipy.fft import fft, fftfreq
+import wfdb
+from wfdb import rdrecord
+from scipy.io import loadmat
+
+# ---------- Utilities ----------
+def list_directory(start_dir, depth=1):
+    """
+    Prints directory structure up to given depth.
+    """
+    for root, dirs, files in os.walk(start_dir):
+        level = root.replace(start_dir, '').count(os.sep)
+        if level > depth:
+            continue
+        indent = '  ' * level
+        print(f"{indent}{os.path.basename(root)}/")
+        if level < depth:
+            for f in files:
+                print(f"{indent}  - {f}")
+
+# ---------- Parse Chapman Header ----------
+def parse_chapman_header(hea_path):
+    """
+    Extracts metadata from Chapman-Shaoxing .hea header.
+    Returns dict with record id, fs, samples, age, sex, diagnosis, and lead boundaries.
+    """
+    with open(hea_path, 'r') as f:
+        lines = [l.strip() for l in f.readlines()]
+    # Header line example: JS00001.mat 16+24 1000/mV 16 0 -254 21756 0 I
+    parts = lines[0].split()
+    record_id = parts[0].replace('.mat', '')
+    n_leads = parts[1]
+    fs = parts[2]
+    total_samples = parts[3]
+    # Following 12 lines: lead info
+    leads = {}
+    for i in range(1, 13):
+        row = lines[i].split()
+        first_val = row[5]
+        last_val = row[6]
+        lead_name = row[7]
+        leads[lead_name] = {'first': first_val, 'last': last_val}
+    # Clinical metadata at end
+    # Last line format: Aged=XX Sex=M dx=426177001 ...
+    meta_line = next((l for l in lines if 'dx=' in l), '')
+    age = None
+    sex = None
+    dx = None
+    for token in meta_line.split():
+        if token.startswith('Age=') or token.startswith('Age='):
+            age = token.split('=')[1]
+        if token.startswith('Sex='):
+            sex = token.split('=')[1]
+        if token.startswith('dx='):
+            dx = token.split('=')[1]
+    metadata = {
+        'record': record_id,
+        'n_leads': n_leads,
+        'fs': fs,
+        'samples': total_samples,
+        'age': age,
+        'sex': sex,
+        'diagnosis': dx,
+    }
+    # Include lead first/last values
+    for lead, v in leads.items():
+        metadata[f'{lead}_first'] = v['first']
+        metadata[f'{lead}_last'] = v['last']
+    return metadata
+
+# ---------- Loading Metadata ----------
+def load_ptbxl_metadata(ptb_dir):
+    csv = next((os.path.join(r, f) for r, _, fs in os.walk(ptb_dir)
+                for f in fs if f == 'ptbxl_database.csv'), None)
+    df = pd.read_csv(csv)
+    return df[['ecg_id', 'filename_lr', 'scp_codes', 'age', 'sex']]
+
+def load_chapman_metadata(path):
+    recs = []
+    for root, _, files in os.walk(path):
+        for file in files:
+            if file.endswith('.hea') and 'Zone' not in file:
+                hea = os.path.join(root, file)
+                recs.append(parse_chapman_header(hea))
+    return pd.DataFrame(recs)
+
+# ---------- Signal Loading ----------
+def load_ptbxl_signal(ptb_dir, filename_lr):
+    record = rdrecord(os.path.join(ptb_dir, filename_lr))
+    return record.p_signal.T, record.fs  # shape: (n_leads, n_samples)
+
+def load_chapman_signal(chap_dir, record_id):
+    mat_path = os.path.join(chap_dir, f"{record_id}.mat")
+    data = loadmat(mat_path)['val']  # shape: (n_leads, n_samples)
+    fs = 500  # known sampling rate
+    return data, fs
+
+# ---------- Visualization ----------
+def plot_signal(time, signal, lead=0, title="ECG Signal"):
+    plt.figure()
+    plt.plot(time, signal[lead])
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.title(f"{title} - Lead {lead}")
+    plt.grid(True)
+    plt.show()
+
+def plot_fft(signal, fs, lead=0, title="FFT of ECG Signal"):
+    n = signal.shape[1]
+    yf = fft(signal[lead])
+    xf = fftfreq(n, 1 / fs)
+    plt.figure()
+    plt.plot(xf[:n//2], np.abs(yf[:n//2]))
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Magnitude')
+    plt.title(f"{title} - Lead {lead}")
+    plt.grid(True)
+    plt.show()
+
+# ---------- Filtering ----------
+def butter_lowpass(cutoff, fs, order=4):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return b, a
+
+def apply_lowpass(data, fs, cutoff=40.0, order=4):
+    b, a = butter_lowpass(cutoff, fs, order)
+    return filtfilt(b, a, data)
+
+# ---------- Main Analysis ----------
+if __name__ == '__main__':
+    # Paths
+    PTBXL_DIR = 'data/ptb-xl'
+    CHAPMAN_DIR = 'data/ChapmanShaoxing'
+
+    # Inspect directory structures
+    print("PTB-XL structure:")
+    list_directory(PTBXL_DIR)
+    print("\nChapman-Shaoxing structure:")
+    list_directory(CHAPMAN_DIR)
+
+    # Load metadata and filter normals
+    ptb_meta = load_ptbxl_metadata(PTBXL_DIR)
+    ptb_norm = ptb_meta[ptb_meta['scp_codes'].str.contains('NORM', na=False)]
+    print(f"PTB-XL normales: {len(ptb_norm)} registros")
+
+    chap_meta = load_chapman_metadata(CHAPMAN_DIR)
+    chap_norm = chap_meta[chap_meta['diagnosis'] == '426177001']  # SR code
+    print(f"Chapman-Shaoxing normales: {len(chap_norm)} registros")
+
+    # Select first normal record from PTB-XL
+    sample = ptb_norm.iloc[0]
+    sig, fs = load_ptbxl_signal(PTBXL_DIR, sample['filename_lr'])
+    time = np.arange(sig.shape[1]) / fs
+
+    # Plot raw signal
+    plot_signal(time, sig, lead=0, title="Raw PTB-XL ECG")
+
+    # Plot FFT
+    plot_fft(sig, fs, lead=0, title="Spectrum PTB-XL ECG")
+
+    # Apply lowpass filter and plot
+    filtered = apply_lowpass(sig, fs, cutoff=40.0)
+    plot_signal(time, np.vstack([sig, filtered]), lead=0, title="Raw vs Filtered (Lead 0)")
+    
+    # Similarly for Chapman-Shaoxing
+    chap_sample = chap_norm.iloc[0]
+    chap_sig, chap_fs = load_chapman_signal(CHAPMAN_DIR, chap_sample['record'])
+    chap_time = np.arange(chap_sig.shape[1]) / chap_fs
+
+    plot_signal(chap_time, chap_sig, lead=0, title="Raw Chapman ECG")
+    plot_fft(chap_sig, chap_fs, lead=0, title="Spectrum Chapman ECG")
+    chap_filt = apply_lowpass(chap_sig, chap_fs, cutoff=40.0)
+    plot_signal(chap_time, np.vstack([chap_sig, chap_filt]), lead=0, title="Raw vs Filtered Chapman")
+```
+
+--- END FILE: ecg_preprocessing_analysis.py ---
+
+--- START FILE: ecg_project/model.py ---
+
+```python
+"""
+model.py
+Define el CVAE 1D con cálculo dinámico del tamaño de flatten.
+"""
+import torch
+import torch.nn as nn
+
+# class CVAE(nn.Module):
+#     def __init__(self, in_channels=1, latent_dim=60, input_length=2048):
+#         super().__init__()
+#         # Encoder: 9 capas Conv1d
+#         kernels = [19]*6 + [9]*3
+#         layers = []
+#         ch = in_channels
+#         for k_i, k in enumerate(kernels):
+#             out_ch = 16 if k_i < 6 else 32
+#             layers += [
+#                 nn.Conv1d(ch, out_ch, k, stride=2, padding=k//2),
+#                 nn.BatchNorm1d(out_ch),
+#                 nn.LeakyReLU()
+#             ]
+#             ch = out_ch
+#         self.encoder = nn.Sequential(*layers)
+
+#         # Calcular tamaño flattened
+#         length = input_length
+#         for k in kernels:
+#             length = (length + 2*(k//2) - (k-1) - 1)//2 + 1
+#         self.flat_size = ch * length
+
+#         # Proyecciones latentes
+#         self.fc_mu     = nn.Linear(self.flat_size, latent_dim)
+#         self.fc_logvar = nn.Linear(self.flat_size, latent_dim)
+
+#         # Decoder
+#         self.fc_dec = nn.Linear(latent_dim, self.flat_size)
+#         rev_layers = []
+#         ch_dec = ch
+#         for idx, k in reversed(list(enumerate(kernels))):
+#             in_ch = ch_dec
+#             out_ch = in_channels if idx==0 else (16 if idx<6 else 32)
+#             rev_layers += [
+#                 nn.ConvTranspose1d(in_ch, out_ch, k, stride=2, padding=k//2, output_padding=1),
+#                 nn.BatchNorm1d(out_ch),
+#                 nn.LeakyReLU()
+#             ]
+#             ch_dec = out_ch
+#         self.decoder = nn.Sequential(*rev_layers)
+
+#     def reparameterize(self, mu, logvar):
+#         std = torch.exp(0.5*logvar)
+#         return mu + torch.randn_like(std)*std
+
+#     def forward(self, x):
+#         enc = self.encoder(x)
+#         flat = enc.view(x.size(0), -1)
+#         mu, logvar = self.fc_mu(flat), self.fc_logvar(flat)
+#         z = self.reparameterize(mu, logvar)
+#         dec_in = self.fc_dec(z).view_as(enc)
+#         recon = self.decoder(dec_in)
+#         return recon, mu, logvar
+
+class CVAE(nn.Module):
+    def __init__(self, in_channels=1, latent_dim=60, input_length=2048):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv1d(in_channels, 16, kernel_size=19, stride=2, padding=9),
+            nn.ReLU(),
+            nn.Conv1d(16, 32, kernel_size=15, stride=2, padding=7),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=11, stride=2, padding=5),
+            nn.ReLU(),
+            nn.Conv1d(64, 128, kernel_size=7, stride=2, padding=3),
+            nn.ReLU(),
+        )
+        self.flatten = nn.Flatten()
+        self.fc_mu = nn.Linear(128 * (input_length // 16), latent_dim)
+        self.fc_logvar = nn.Linear(128 * (input_length // 16), latent_dim)
+
+        self.fc_dec = nn.Linear(latent_dim, 128 * (input_length // 16))
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose1d(128, 64, kernel_size=7, stride=2, padding=3, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose1d(64, 32, kernel_size=11, stride=2, padding=5, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose1d(32, 16, kernel_size=15, stride=2, padding=7, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose1d(16, in_channels, kernel_size=19, stride=2, padding=9, output_padding=1),
+            nn.Sigmoid()
+        )
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, x):
+        enc = self.encoder(x)
+        flat = self.flatten(enc)
+        mu = self.fc_mu(flat)
+        logvar = self.fc_logvar(flat)
+        z = self.reparameterize(mu, logvar)
+        dec_input = self.fc_dec(z).view(x.size(0), 128, x.size(2) // 16)
+        recon = self.decoder(dec_input)
+        return recon, mu, logvar
+
+
+
+def loss_function(recon_x, x, mu, logvar):
+    recon_loss = nn.functional.mse_loss(recon_x, x, reduction='mean')
+    kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    return recon_loss + kld
+```
+
+--- END FILE: ecg_project/model.py ---
+
+--- START FILE: ecg_project/pipeline.py ---
+
+```python
+# pipeline.py
+"""
+Pipeline de entrenamiento, validación y test en sanos vs anomalías PTB-XL y Chapman.
+Basado en Jang et al. (2021): 18 epochs, lr=1e-3, latent=60, MSE+KL, segmentos de 8.192s a 250Hz.
+"""
+
+import os
+import torch
+import numpy as np
+import pandas as pd
+from torch.utils.data import DataLoader, TensorDataset, random_split
+from tqdm.auto import tqdm
+from scipy.io import loadmat
+
+
+# Importa TODO de tu preprocess.py
+from preprocess import (
+    load_ptbxl, load_chapman,             # cargas en batch
+    load_ptbxl_signal,                    # carga señal individual PTB-XL
+    apply_highpass, resample_signal,      # funciones de preprocesamiento
+    zscore_normalize, segment_signal,
+    find_file
+)
+from model import CVAE, loss_function
+from test_functions import (
+    compute_reconstruction_error,
+    evaluate_detection,
+    save_metrics
+)
+
+
+# RUTAS y HYPERPARAMS
+
+import os
+
+def find_data_subfolder(subfolder_name, start_path='.'):
+    current_path = os.path.abspath(start_path)
+    while True:
+        candidate = os.path.join(current_path, 'data', subfolder_name)
+        if os.path.isdir(candidate):
+            return candidate
+        parent = os.path.dirname(current_path)
+        if parent == current_path:
+            break
+        current_path = parent
+    return None
+
+# Ahora buscás las rutas relativas automáticamente:
+PTB_DIR = find_data_subfolder('ptb-xl/1.0.3')
+CHAP_DIR = find_data_subfolder('ChapmanShaoxing')
+MIT_DIR = find_data_subfolder('mitdb')
+
+
+EPOCHS    = 18
+BATCH     = 32
+LR        = 1e-3
+LATENT    = 60
+MODEL_OUT = 'best_cvae.pth'
+METRICS_OUT = 'metrics_combined_lead_II.json'
+
+
+def preprocess_and_segment(sig, fs):
+    """
+    Aplica filtro, remuestreo y normalización a una señal (12, L).
+    """
+    sig = apply_highpass(sig, fs)
+    sig = resample_signal(sig, fs)
+    sig = zscore_normalize(sig)
+    sig = segment_signal(sig)
+    return sig
+
+
+def load_ptbxl_anomalies(ptb_dir, meta_df):
+    """
+    Recorre el metadata DF de PTB-XL para cargar solo las señales con SCP != NORM.
+    Devuelve array (N,12,2048).
+    """
+    out = []
+    for _, row in meta_df.iterrows():
+        fn = row['filename_lr']
+        hea = os.path.basename(fn) + '.hea'
+        hea_path = find_file(ptb_dir, hea)
+        prefix = os.path.splitext(hea_path)[0]
+        rec = load_ptbxl_signal(ptb_dir, fn)  # p_signal, fs
+        sig, fs = rec
+        if not row['scp_codes'].count('NORM'):
+            sig = preprocess_and_segment(sig, fs)
+            out.append(sig)
+    return np.stack(out) if out else np.empty((0,12,2048))
+
+
+# def load_chapman_anomalies(chap_dir):
+#     """
+#     Carga todas las señales Chapman y filtra solo las anomalías (Dx != 426177001).
+#     """
+#     out = []
+#     for root, _, files in os.walk(chap_dir):
+#         for f in files:
+#             if f.endswith('.hea') and 'Zone' not in f:
+#                 hea_path = os.path.join(root, f)
+#                 # extrae Dx
+#                 with open(hea_path) as fh:
+#                     lines = fh.read().splitlines()
+#                 dx = next((l.split()[1] for l in lines if l.startswith('#Dx:')), '')
+#                 if dx != '426177001':
+#                     rec_id = f.replace('.hea','')
+#                     mat = os.path.join(root, rec_id + '.mat')
+#                     sig = np.load(mat)['val'] if mat.endswith('.npz') else __import__('scipy.io').loadmat(mat)['val']
+#                     sig = preprocess_and_segment(sig, 500)
+#                     out.append(sig)
+#     return np.stack(out) if out else np.empty((0,12,2048))
+
+
+def load_chapman_anomalies(chap_dir):
+    """
+    Carga todas las señales Chapman y filtra solo las anomalías (Dx != 426177001).
+    """
+    out = []
+    for root, _, files in os.walk(chap_dir):
+        for f in files:
+            if f.endswith('.hea') and 'Zone' not in f:
+                hea_path = os.path.join(root, f)
+                # extrae Dx
+                with open(hea_path) as fh:
+                    lines = fh.read().splitlines()
+                dx = next((l.split()[1] for l in lines if l.startswith('#Dx:')), '')
+                if dx != '426177001':
+                    rec_id = f.replace('.hea','')
+                    mat_path = os.path.join(root, rec_id + '.mat')
+                    # aquí usamos loadmat importado
+                    sig = loadmat(mat_path)['val']   # ya es (12, L)
+                    sig = preprocess_and_segment(sig, 500)
+                    out.append(sig)
+    return np.stack(out) if out else np.empty((0,12,2048))
+
+
+def load_sanos():
+    # --- Carga y prepara sanos PTB+Chapman ---
+    print("Cargando sanos PTB-XL y Chapman…")
+    normals_ptb  = load_ptbxl(PTB_DIR, healthy_only=True)
+    normals_chap = load_chapman(CHAP_DIR, healthy_only=True)
+    data = np.concatenate([normals_ptb, normals_chap], axis=0)
+    print(f"Total sanos disponibles: {len(data)} señales")
+    
+    return data
+
+def main():
+    data = load_sanos()
+    model, val_loader, device= training(data)
+
+def training(data):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Train/Val split 80/20
+    n_val = int(0.2 * len(data))
+    n_train = len(data) - n_val
+    train_set, val_set = random_split(data, [n_train, n_val])
+    train_loader = DataLoader(TensorDataset(torch.tensor(train_set)), batch_size=BATCH, shuffle=True)
+    val_loader = DataLoader(TensorDataset(torch.tensor(val_set)), batch_size=BATCH)
+
+    # --- Modelo ---
+    # model = CVAE(in_channels=1, latent_dim=LATENT, input_length=2048).to(device)
+    model = CVAE(in_channels=1, latent_dim=60, input_length=2048).to(device)
+
+    opt   = torch.optim.Adam(model.parameters(), lr=LR)
+    best_mae = float('inf')
+
+    # Entrenamiento + validación
+    print("Iniciando entrenamiento…")
+    for ep in range(1, EPOCHS+1):
+        model.train()
+        train_loss = 0.0
+        for (x,) in tqdm(train_loader, desc=f"Ep {ep}/{EPOCHS} Train", leave=False):
+            x = x.float().to(device)
+            recon, mu, logvar = model(x)
+            loss = loss_function(recon, x, mu, logvar)
+            opt.zero_grad(); loss.backward(); opt.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
+
+        # Validación MAE
+        model.eval()
+        mae_vals = []
+        with torch.no_grad():
+            for (x,) in val_loader:
+                x = x.float().to(device)
+                recon, _, _ = model(x)
+                mae_vals.append(torch.mean(torch.abs(recon - x)).item())
+        val_mae = np.mean(mae_vals)
+
+        print(f"Epoch {ep}: Train Loss={train_loss:.4f} — Val MAE={val_mae:.4f}")
+        if val_mae < best_mae:
+            best_mae = val_mae
+            torch.save(model.state_dict(), MODEL_OUT)
+            
+    return model, val_loader, device
+
+
+
+# test
+
+def load(model, val_loader, device):
+    # --- Test: sanos hold-out vs anomalías ---
+    print("Cargando metadata PTB-XL para anomalías…")
+    df_meta = pd.read_csv(find_file(PTB_DIR, 'ptbxl_database.csv'))
+    # # Hold-out sanos
+    # healthy_errors = compute_reconstruction_error(model, val_loader, device)
+    # print(f"Hold-out sanos MAE mean={healthy_errors.mean():.4f}, std={healthy_errors.std():.4f}")
+    
+    # hold-out sanos
+    healthy_errors = compute_reconstruction_error(model, val_loader, device)
+    thr = np.percentile(healthy_errors, 12.16)
+    print(f"Threshold @12pct de sanos: {thr:.4f}")
+
+    
+    return df_meta, healthy_errors, thr
+
+
+def anomalos_ptb(df_meta, model, device):
+    # Anómalos PTB-XL
+    anom_ptb = load_ptbxl_anomalies(PTB_DIR, df_meta)
+    ptb_loader = DataLoader(TensorDataset(torch.tensor(anom_ptb)), batch_size=BATCH)
+    ptb_errors = compute_reconstruction_error(model, ptb_loader, device)
+    print(f"Anómalos PTB-XL: {len(anom_ptb)} señales")
+    
+    return ptb_errors
+    
+
+def anomalos_chap(model, device):
+
+    # Anómalos Chapman
+    anom_chap = load_chapman_anomalies(CHAP_DIR)
+    chap_loader = DataLoader(TensorDataset(torch.tensor(anom_chap)), batch_size=BATCH)
+    chap_errors = compute_reconstruction_error(model, chap_loader, device)
+    print(f"Anómalos Chapman: {len(anom_chap)} señales")
+    
+    return chap_errors
+
+
+def metrics(healthy_errors, ptb_errors, chap_errors):
+
+    # Métricas combinadas
+    y_true = np.concatenate([
+        np.zeros_like(healthy_errors),
+        np.ones_like(ptb_errors),
+        np.ones_like(chap_errors)
+    ])
+    y_pred = np.concatenate([
+        healthy_errors,
+        ptb_errors,
+        chap_errors
+    ]) > (healthy_errors.mean() + 3 * healthy_errors.std())
+
+    metrics = evaluate_detection(y_true, y_pred)
+    print("Métricas final (sanos vs PTB+Chapman anomalías):", metrics)
+    save_metrics(metrics, METRICS_OUT)
+    print(f"Resultados guardados en {METRICS_OUT}")
+
+
+def metrics_fixed_threshold(healthy_errors, ptb_errors, chap_errors, threshold):
+    y_true = np.concatenate([
+        np.zeros_like(healthy_errors),
+        np.ones_like(ptb_errors),
+        np.ones_like(chap_errors)
+    ])
+    y_pred = np.concatenate([
+        healthy_errors,
+        ptb_errors,
+        chap_errors
+    ]) > threshold
+
+    metrics = evaluate_detection(y_true, y_pred)
+    print("Métricas (con umbral percentil 12 de sanos):", metrics)
+    save_metrics(metrics, METRICS_OUT)
+    print(f"Resultados guardados en {METRICS_OUT}")
+    
+
+if __name__ == '__main__':
+    main()
+```
+
+--- END FILE: ecg_project/pipeline.py ---
+
+--- START FILE: ecg_project/preprocess.py ---
+
+```python
+"""
+preprocess.py
+Cargado y preprocesamiento de ECG:
+  - PTB-XL (batch y señal individual)
+  - Chapman-Shaoxing
+  - MIT-BIH Arrhythmia (opcional)
+Operaciones:
+  - High-pass (0.5 Hz)
+  - Resample a 250 Hz
+  - Z-score por canal
+  - Segmentación fija a 8.192 s → 2048 muestras
+  - Búsqueda recursiva de archivos
+"""
+
+import os
+import numpy as np
+import pandas as pd
+from scipy.signal import butter, filtfilt, resample
+import wfdb
+from wfdb import rdrecord
+from scipy.io import loadmat
+
+# Parámetros globales de preprocessing
+TARGET_FS       = 250      # frecuencia deseada
+SEGMENT_SEC     = 8.192    # segundos de segmentación
+SEGMENT_SAMPLES = int(TARGET_FS * SEGMENT_SEC)  # 2048 muestras
+
+def butter_highpass(cutoff, fs, order=4):
+    nyq = 0.5 * fs
+    normal_cutoff = cutoff / nyq
+    return butter(order, normal_cutoff, btype='high', analog=False)
+
+def apply_highpass(sig, fs, cutoff=0.5, order=4):
+    """
+    Filtrado pasa-altos canal-a-canal para remover drift de línea base.
+    """
+    b, a = butter_highpass(cutoff, fs, order)
+    return filtfilt(b, a, sig, axis=1)
+
+def resample_signal(sig, orig_fs):
+    """
+    Remuestrea la señal multicanal a TARGET_FS.
+    """
+    n_samples = int(sig.shape[1] * TARGET_FS / orig_fs)
+    return resample(sig, n_samples, axis=1)
+
+def zscore_normalize(sig):
+    """
+    Normalización Z-score por canal (derivación).
+    """
+    mean = np.mean(sig, axis=1, keepdims=True)
+    std  = np.std(sig,  axis=1, keepdims=True) + 1e-6
+    return (sig - mean) / std
+
+
+def segment_signal(sig):
+    # sig: (12, L)
+    # seleccionamos solo lead II, que suele ser el canal 1 (ajustá si fuera otro índice)
+    sig = sig[1:2, :]   # ahora (1, L)
+    if sig.shape[1] >= SEGMENT_SAMPLES:
+        return sig[:, :SEGMENT_SAMPLES]
+    pad = SEGMENT_SAMPLES - sig.shape[1]
+    return np.pad(sig, ((0,0),(0,pad)), mode='constant')
+
+
+
+def find_file(root, filename):
+    """
+    Busca recursivamente `filename` bajo `root` y devuelve la ruta completa.
+    """
+    for r, _, files in os.walk(root):
+        if filename in files:
+            return os.path.join(r, filename)
+    return None
+
+
+# ---------------------------------------
+#  PTB-XL
+# ---------------------------------------
+
+def load_ptbxl(ptb_dir, healthy_only=True):
+    """
+    Carga en batch todos los ECG de PTB-XL sanos (o todos si healthy_only=False).
+    Retorna array (N, 12, 2048).
+    """
+    # Encuentra CSV de metadata
+    csv_path = find_file(ptb_dir, 'ptbxl_database.csv')
+    if csv_path is None:
+        raise FileNotFoundError(f"ptbxl_database.csv no encontrado en {ptb_dir}")
+    df = pd.read_csv(csv_path)
+    if healthy_only:
+        df = df[df['scp_codes'].str.contains('NORM', na=False)]
+    records = []
+    for _, row in df.iterrows():
+        sig, fs = load_ptbxl_signal(ptb_dir, row['filename_lr'])
+        sig = apply_highpass(sig, fs)
+        sig = resample_signal(sig, fs)
+        sig = zscore_normalize(sig)
+        sig = segment_signal(sig)
+        records.append(sig)
+    return np.stack(records, axis=0)
+
+def load_ptbxl_signal(ptb_dir, filename_lr):
+    """
+    Carga un solo registro PTB-XL (prefix = filename_lr):
+    devuelve (sig.T, fs) con sig de forma (12, L).
+    """
+    hea_name = os.path.basename(filename_lr) + '.hea'
+    hea_path = find_file(ptb_dir, hea_name)
+    if hea_path is None:
+        raise FileNotFoundError(f"No encontré header {hea_name} en {ptb_dir}")
+    prefix = os.path.splitext(hea_path)[0]
+    rec = rdrecord(prefix)
+    # p_signal es (L, 12), lo queremos (12, L)
+    return rec.p_signal.T, rec.fs
+
+
+# ---------------------------------------
+#  Chapman-Shaoxing
+# ---------------------------------------
+
+def load_chapman(chap_dir, healthy_only=True):
+    """
+    Carga en batch señales de Chapman:
+      - healthy_only=True → filtra Dx=426177001 (sinus rhythm)
+      - healthy_only=False → carga todas
+    Retorna array (N,12,2048).
+    """
+    records = []
+    for root, _, files in os.walk(chap_dir):
+        for f in files:
+            if not f.endswith('.hea') or 'Zone' in f:
+                continue
+            hea_path = os.path.join(root, f)
+            # Parsea diagnóstico
+            with open(hea_path) as fh:
+                lines = fh.read().splitlines()
+            dx = next((l.split()[1] for l in lines if l.startswith('#Dx:')), '')
+            if healthy_only and dx != '426177001':
+                continue
+            # Carga .mat asociado
+            rec_id = f.replace('.hea','')
+            mat_path = os.path.join(root, rec_id + '.mat')
+            val = loadmat(mat_path)['val']  # forma (12, L)
+            sig, fs0 = val, 500
+            # Preprocesamiento idéntico
+            sig = apply_highpass(sig, fs0)
+            sig = resample_signal(sig, fs0)
+            sig = zscore_normalize(sig)
+            sig = segment_signal(sig)
+            records.append(sig)
+    return np.stack(records, axis=0) if records else np.empty((0,12,SEGMENT_SAMPLES))
+
+# ---------------------------------------
+#  MIT-BIH (opcional)
+# ---------------------------------------
+
+def load_mitbih(mit_dir):
+    """
+    Carga todos los .dat de MIT-BIH recursivamente.
+    Retorna array (N,12,2048) o vacío si no hay.
+    """
+    records = []
+    for root, _, files in os.walk(mit_dir):
+        for f in files:
+            if f.endswith('.dat'):
+                prefix = os.path.splitext(os.path.join(root, f))[0]
+                try:
+                    rec = rdrecord(prefix)
+                    sig, fs = rec.p_signal.T, rec.fs
+                    sig = apply_highpass(sig, fs)
+                    sig = resample_signal(sig, fs)
+                    sig = zscore_normalize(sig)
+                    sig = segment_signal(sig)
+                    records.append(sig)
+                except Exception as e:
+                    print(f"Warning: no pude leer {prefix}: {e}")
+    return np.stack(records, axis=0) if records else np.empty((0,12,SEGMENT_SAMPLES))
+```
+
+--- END FILE: ecg_project/preprocess.py ---
+
+--- START FILE: ecg_project/test_functions.py ---
+
+```python
+"""
+test_functions.py
+Functions to evaluate the CVAE.
+"""
+import numpy as np
+import torch
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
+
+
+# def compute_reconstruction_error(model, loader, device):
+#     model.eval()
+#     errors = []
+#     with torch.no_grad():
+#         for (x,) in loader:
+#             x = x.to(device).float()  # <- ESTE CASTEO ES CLAVE
+#             recon, _, _ = model(x)
+#             err = torch.mean((recon - x) ** 2, dim=[1, 2])  # por señal
+#             errors.append(err.cpu().numpy())
+#     return np.concatenate(errors)
+
+
+def compute_reconstruction_error(model, loader, device):
+    model.eval()
+    errs = []
+    with torch.no_grad():
+        for (x,) in loader:
+            x = x.to(device).float()
+            recon, _, _ = model(x)
+            # error absoluto medio por muestra
+            err = torch.mean(torch.abs(recon - x), dim=[1,2])
+            errs.append(err.cpu().numpy())
+    return np.concatenate(errs)
+
+
+def evaluate_detection(y_true, y_pred):
+    return {
+        'precision': precision_score(y_true, y_pred),
+        'recall': recall_score(y_true, y_pred),
+        'f1': f1_score(y_true, y_pred),
+        'auc': roc_auc_score(y_true, y_pred)
+    }
+
+def save_metrics(metrics, outfile):
+    import json
+    with open(outfile, 'w') as f:
+        json.dump(metrics, f, indent=2)
+```
+
+--- END FILE: ecg_project/test_functions.py ---
+
+--- START FILE: train_ecg_vae.py ---
+
+```python
+# train_ecg_cvae_jang2021.py
+"""
+Implementación inspirada en Jang et al. (2021) PLOS ONE:
+"Unsupervised feature learning for ECG data using the convolutional variational autoencoder".
+
+Características clave:
+- Datos: Use solo lead II de PTB-XL y Chapman, resampleado a 250 Hz y Z-score.
+- Arquitectura:
+  * Encoder: 9 bloques de Conv1d (6 capas con kernel=19, luego 3 capas con kernel=9), cada una con BatchNorm y LeakyReLU.
+  * Latente: dimensión de 60 (mu y logvar de 60).
+  * Decoder: simétrico con 2 capas FC + 2 capas ConvTranspose1d para reconstruir 2048 muestras (8.2 s a 250 Hz).
+- Preprocesamiento:
+  * Butterworth pasa-altos 0.5 Hz para remover línea base.
+  * Resampleo a 250 Hz.
+  * Cada señal centrada en segmento de longitud fija de 8.2 s (2048 muestras).
+  * Normalización Z-score.
+- Entrenamiento:
+  * Optimizer: Adam, lr=1e-4.
+  * Early stopping: detener si no mejora validación tras 5 épocas, máximo 50 épocas.
+  * Batch size: 32.
+  * Pérdida: ELBO = MSE + beta * KLD, con beta=1 (VAE estándar) o configurable.
+
+Guarda el mejor modelo y scores de validación/test para análisis.
+"""
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, random_split
+from scipy.signal import butter, filtfilt
+from scipy.io import loadmat
+import wfdb
+from wfdb import rdrecord
+from scipy.signal import resample
+
+# ----- Preprocesamiento -----
+def butter_highpass(cutoff, fs, order=4):
+    nyq = 0.5 * fs
+    norm_cutoff = cutoff / nyq
+    b, a = butter(order, norm_cutoff, btype='high')
+    return b, a
+
+def apply_preproc(sig, fs_src, target_fs=250, length=2048):
+    # High-pass para remover baseline
+    b, a = butter_highpass(0.5, fs_src)
+    sig = filtfilt(b, a, sig, axis=1)
+    # Resample a 250 Hz
+    sig = resample(sig, int(sig.shape[1] * target_fs / fs_src), axis=1)
+    # Centrar en medio y recortar/pad a length
+    N = sig.shape[1]
+    if N >= length:
+        start = (N - length)//2
+        seg = sig[:, start:start+length]
+    else:
+        seg = np.zeros((sig.shape[0], length))
+        seg[:, (length-N)//2:(length-N)//2+N] = sig
+    # Z-score por canal
+    mu = seg.mean(axis=1, keepdims=True)
+    std = seg.std(axis=1, keepdims=True) + 1e-6
+    return (seg - mu) / std
+
+# ----- Dataset -----
+class ECGLeadIIDataset(Dataset):
+    def __init__(self, ptb_dir, chap_dir, length=2048, include_ano=False):
+        self.records = []
+        # PTB-XL
+        csv = next((os.path.join(r,f) for r,_,fs in os.walk(ptb_dir) for f in fs if f=='ptbxl_database.csv'), None)
+        df = np.loadtxt(csv, delimiter=',', dtype=str, skiprows=1)  # adapt to your CSV structure
+        for row in df:
+            scp = row[3]
+            idf = row[1]
+            label = 1 if 'NORM' in scp else 0
+            if label==1 or include_ano:
+                self.records.append(('ptb', idf, label))
+        # Chapman
+        for root,_,files in os.walk(chap_dir):
+            for f in files:
+                if f.endswith('.hea') and 'Zone' not in f:
+                    with open(os.path.join(root,f)) as h:
+                        lines = h.readlines()
+                    dx = next((l.split()[1] for l in lines if l.startswith('#Dx:')), '0')
+                    label = 1 if dx=='426177001' else 0
+                    if label==1 or include_ano:
+                        rec_id = os.path.splitext(f)[0]
+                        self.records.append(('chap', rec_id, label))
+        self.ptb_dir, self.chap_dir = ptb_dir, chap_dir
+        self.length = length
+
+    def __len__(self): return len(self.records)
+
+    def __getitem__(self, idx):
+        src, idf, label = self.records[idx]
+        if src=='ptb':
+            hea = os.path.basename(idf)+'.hea'
+            path = next((os.path.join(r,hea) for r,_,_ in os.walk(self.ptb_dir) if hea in os.listdir(r)), None)
+            rec = rdrecord(path.replace('.hea',''))
+            sig = rec.p_signal.T; fs = rec.fs
+        else:
+            mat = loadmat(os.path.join(self.chap_dir, idf+'.mat'))
+            sig = mat['val']; fs = 500
+        seg = apply_preproc(sig, fs, target_fs=250, length=self.length)
+        return torch.tensor(seg, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
+
+# ----- cVAE Jang2021 -----
+class cVAE1D(nn.Module):
+    def __init__(self, in_ch=1, z_dim=60, seq_len=2048):
+        super().__init__()
+        layers = []
+        ch = in_ch
+        # 6 capas de kernel 19
+        for _ in range(6):
+            layers += [nn.Conv1d(ch, ch, kernel_size=19, stride=2, padding=9), nn.BatchNorm1d(ch), nn.LeakyReLU()]
+        # 3 capas de kernel 9
+        for _ in range(3):
+            layers += [nn.Conv1d(ch, ch, kernel_size=9, stride=2, padding=4), nn.BatchNorm1d(ch), nn.LeakyReLU()]
+        self.enc = nn.Sequential(*layers)
+        t_p = seq_len // (2**9)  # reduce factor 2^9
+        self.fc_mu  = nn.Linear(ch * t_p, z_dim)
+        self.fc_log = nn.Linear(ch * t_p, z_dim)
+        # decoder
+        self.fc_dec = nn.Linear(z_dim, ch * t_p)
+        self.dec = nn.Sequential(
+            nn.ConvTranspose1d(ch, ch, kernel_size=9, stride=2, padding=4, output_padding=1), nn.BatchNorm1d(ch), nn.LeakyReLU(),
+            nn.ConvTranspose1d(ch, in_ch, kernel_size=19, stride=2, padding=9, output_padding=1), nn.Tanh(),
+        )
+
+    def reparam(self, mu, logv):
+        std = (0.5 * logv).exp(); eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, x):
+        h = self.enc(x.unsqueeze(1))  # (B,1,L) -> channels
+        h = h.flatten(1)
+        mu = self.fc_mu(h); logv = self.fc_log(h)
+        z = self.reparam(mu, logv)
+        h2 = self.fc_dec(z).view(x.size(0), 1, -1)
+        x_hat = self.dec(h2).squeeze(1)
+        return x_hat, mu, logv
+
+# ----- Entrenamiento con EarlyStopping -----
+def train():
+    PTB, CH = 'data/ptb-xl', 'data/ChapmanShaoxing'
+    ds = ECGLeadIIDataset(PTB, CH, include_ano=True)
+    n = len(ds)
+    n_test, n_val = int(0.1*n), int(0.1*n)
+    ds_tr, ds_val, ds_te = random_split(ds, [n-n_val-n_test, n_val, n_test])
+    lt_tr = DataLoader(ds_tr, 32, shuffle=True)
+    lt_val = DataLoader(ds_val, 32)
+    lt_te = DataLoader(ds_te, 32)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = cVAE1D(in_ch=1, z_dim=60, seq_len=2048).to(device)
+    opt = optim.Adam(model.parameters(), lr=1e-4)
+    best_val = float('inf'); no_imp = 0
+
+    for ep in range(1, 51):
+        model.train(); train_loss=0
+        for xb, _ in lt_tr:
+            xb = xb.to(device)
+            xh, mu, logv = model(xb)
+            recon = nn.functional.mse_loss(xh, xb, reduction='mean')
+            kld   = -0.5 * torch.mean(1 + logv - mu.pow(2) - logv.exp())
+            loss = recon + kld
+            opt.zero_grad(); loss.backward(); opt.step()
+            train_loss += loss.item()
+        train_loss /= len(lt_tr)
+        # valid
+        model.eval(); val_loss=0
+        with torch.no_grad():
+            for xb,_ in lt_val:
+                xb = xb.to(device)
+                xh, mu, logv = model(xb)
+                recon = nn.functional.mse_loss(xh, xb, reduction='mean')
+                kld   = -0.5 * torch.mean(1 + logv - mu.pow(2) - logv.exp())
+                val_loss += (recon + kld).item()
+        val_loss /= len(lt_val)
+        print(f"Epoch {ep}  Train: {train_loss:.4f}  Val: {val_loss:.4f}")
+        # early stop
+        if val_loss < best_val:
+            best_val = val_loss; no_imp = 0
+            torch.save(model.state_dict(), 'cvae_jang_best.pth')
+        else:
+            no_imp += 1
+            if no_imp >=5:
+                print("No improvement for 5 epochs, stopping.")
+                break
+
+    # test final
+    model.load_state_dict(torch.load('cvae_jang_best.pth'))
+    recons, klds = [], []
+    model.eval()
+    with torch.no_grad():
+        for xb,_ in lt_te:
+            xb = xb.to(device)
+            xh, mu, logv = model(xb)
+            recons.append(nn.functional.mse_loss(xh, xb, reduction='none').mean(dim=1).cpu().numpy())
+            klds.append((-0.5*(1+logv-logv.exp()-mu.pow(2))).sum(dim=1).cpu().numpy())
+    np.save('test_scores.npy', np.stack([np.concatenate(recons), np.concatenate(klds)],1))
+    print("Entrenamiento y evaluación completos.")
+
+if __name__=='__main__':
+    train()
+```
+
+--- END FILE: train_ecg_vae.py ---

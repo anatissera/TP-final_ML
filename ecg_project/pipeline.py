@@ -171,7 +171,12 @@ def training(data, epochs = EPOCHS):
     for ep in range(1, epochs+1):
         model.train()
         train_loss = 0.0
+<<<<<<< Updated upstream
         for (x,) in tqdm(train_loader, desc=f"Ep {ep}/{epochs} Train", leave=False):
+=======
+        for (x,) in tqdm(train_loader, desc=f"Ep {ep}/{EPOCHS} Train", leave=False):
+            print("Input shape:", x.shape)
+>>>>>>> Stashed changes
             x = x.float().to(device)
             recon, mu, logvar = model(x)
             loss = loss_function(recon, x, mu, logvar)
