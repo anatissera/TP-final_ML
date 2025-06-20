@@ -60,38 +60,33 @@ import torch.nn as nn
 #         recon = self.decoder(dec_in)
 #         return recon, mu, logvar
 
-
 class CVAE(nn.Module):
     def __init__(self, in_channels=1, latent_dim=60, input_length=2048):
         super().__init__()
-        # Encoder
         self.encoder = nn.Sequential(
-            nn.Conv1d(in_channels, 16, kernel_size=19, stride=2, padding=9), nn.ReLU(),
-            nn.Conv1d(16, 32, kernel_size=15, stride=2, padding=7), nn.ReLU(),
-            nn.Conv1d(32, 64, kernel_size=11, stride=2, padding=5), nn.ReLU(),
-            nn.Conv1d(64, 128, kernel_size=7, stride=2, padding=3), nn.ReLU(),
+            nn.Conv1d(in_channels, 16, kernel_size=19, stride=2, padding=9),
+            nn.ReLU(),
+            nn.Conv1d(16, 32, kernel_size=15, stride=2, padding=7),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=11, stride=2, padding=5),
+            nn.ReLU(),
+            nn.Conv1d(64, 128, kernel_size=7, stride=2, padding=3),
+            nn.ReLU(),
         )
-        # Calcular dinámicamente flat_size con tensor dummy
-        with torch.no_grad():
-            dummy = torch.zeros(1, in_channels, input_length)
-            enc_out = self.encoder(dummy)
-            flat_size = enc_out.numel()  # 1 * channels * length
-
-        # Flatten y proyecciones latentes
         self.flatten = nn.Flatten()
-        self.fc_mu     = nn.Linear(flat_size, latent_dim)
-        self.fc_logvar = nn.Linear(flat_size, latent_dim)
+        self.fc_mu = nn.Linear(128 * (input_length // 16), latent_dim)
+        self.fc_logvar = nn.Linear(128 * (input_length // 16), latent_dim)
 
-        # Decoder
-        self.fc_dec = nn.Linear(latent_dim, flat_size)
-        # Reconstrucción a partir de encoder dummy shape
-        channels, length = enc_out.shape[1], enc_out.shape[2]
+        self.fc_dec = nn.Linear(latent_dim, 128 * (input_length // 16))
         self.decoder = nn.Sequential(
-            nn.Unflatten(1, (channels, length)),
-            nn.ConvTranspose1d(channels, 64, kernel_size=7, stride=2, padding=3, output_padding=1), nn.ReLU(),
-            nn.ConvTranspose1d(64, 32, kernel_size=11, stride=2, padding=5, output_padding=1), nn.ReLU(),
-            nn.ConvTranspose1d(32, 16, kernel_size=15, stride=2, padding=7, output_padding=1), nn.ReLU(),
-            nn.ConvTranspose1d(16, in_channels, kernel_size=19, stride=2, padding=9, output_padding=1), nn.Sigmoid(),
+            nn.ConvTranspose1d(128, 64, kernel_size=7, stride=2, padding=3, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose1d(64, 32, kernel_size=11, stride=2, padding=5, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose1d(32, 16, kernel_size=15, stride=2, padding=7, output_padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose1d(16, in_channels, kernel_size=19, stride=2, padding=9, output_padding=1),
+            nn.Sigmoid()
         )
 
     def reparameterize(self, mu, logvar):
@@ -99,18 +94,19 @@ class CVAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, x, epoch=None):
+    def forward(self, x):
         enc = self.encoder(x)
         flat = self.flatten(enc)
         mu = self.fc_mu(flat)
         logvar = self.fc_logvar(flat)
         z = self.reparameterize(mu, logvar)
-        dec_in = self.fc_dec(z)
-        recon = self.decoder(dec_in)
+        dec_input = self.fc_dec(z).view(x.size(0), 128, x.size(2) // 16)
+        recon = self.decoder(dec_input)
         return recon, mu, logvar
 
 
-def loss_function(recon_x, x, mu, logvar, beta=1.0):
+
+def loss_function(recon_x, x, mu, logvar):
     recon_loss = nn.functional.mse_loss(recon_x, x, reduction='mean')
     kld = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-    return recon_loss + beta * kld
+    return recon_loss + kld

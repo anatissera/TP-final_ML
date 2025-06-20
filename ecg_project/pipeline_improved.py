@@ -232,15 +232,19 @@ if __name__ == '__main__':
     ptb_df    = pd.read_csv(find_file(PTB_DIR, 'ptbxl_database.csv'))
     anomalies = load_all_anomalies(PTB_DIR, CHAP_DIR, ptb_df)  # (N_ano,1,L)
 
-    # 2) Split normales en train/dev/test (60/20/20)
+        # 2) Split normales en DEV y TEST (80/20)
     n_norm = normals.shape[0]
-    i1 = int(0.6 * n_norm)
-    i2 = int(0.8 * n_norm)
-    train_norm = normals[:i1]
-    val_norm   = normals[i1:i2]
-    test_norm  = normals[i2:]
+    split_dev = int(0.8 * n_norm)
+    dev_norm  = normals[:split_dev]
+    test_norm = normals[split_dev:]
 
-    # 3) Normalización Z-score usando solo train_norm
+    # 3) Dentro de DEV, split en TRAIN y VAL (80/20 of DEV)
+    n_dev = dev_norm.shape[0]
+    split_train = int(0.8 * n_dev)
+    train_norm = dev_norm[:split_train]
+    val_norm   = dev_norm[split_train:]
+
+    # 4) Normalización Z-score usando solo train_norm) Normalización Z-score usando solo train_norm
     mean, std = compute_zscore_stats(train_norm)
     train_norm = apply_zscore(train_norm, mean, std)
     val_norm   = apply_zscore(val_norm,   mean, std)
@@ -252,8 +256,8 @@ if __name__ == '__main__':
     val_tensor   = torch.tensor(val_norm,   dtype=torch.float32)
     test_tensor  = torch.tensor(test_norm,  dtype=torch.float32)
     ano_tensor   = torch.tensor(anomalies,  dtype=torch.float32)
-    
-    # 4) Configuración entrenamiento único
+
+    # Parámetros de entrenamiento final
     latent_dim = 32
     lr         = 1e-3
     n_blocks   = 3
@@ -285,7 +289,7 @@ if __name__ == '__main__':
             total_loss += loss.item()
         print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(dev_loader):.4f}")
 
-    # 6) Prepara test final balanceado: test_norm vs primeras anomalías
+    # 6) Prepara test final balanceado: test_norm vs primeras anomalías: test_norm vs primeras anomalías
     N_test = test_tensor.shape[0]
     test_x = torch.cat([test_tensor, ano_tensor[:N_test]], dim=0)
     y_test = np.concatenate([np.zeros(N_test), np.ones(N_test)])
